@@ -1,11 +1,11 @@
 country,year,lo_pasec_mat_2_pri_gap
 bdi,2014,5.9
 ben,2014,47.1
-bfa,2014,-5.0
-civ,2014,41.0
+bfa,2014,-5
+civ,2014,41
 cmr,2014,57.2
 cog,2014,49.2
-ner,2014,51.0
+ner,2014,51
 sen,2014,132.7
 tcd,2014,69.3
 tgo,2014,69.3
