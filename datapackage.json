@@ -1,0 +1,61 @@
+{
+    "name": "ddf--worldbank--education_statistics",
+    "title": "WorldBank Education Statistics",
+    "description": "WorldBank Education Statistics",
+    "author": "Gapminder",
+    "license": "CC-BY-4.0",
+    "language": {
+        "name": "English",
+        "id": "en"
+    },
+    "created": "2025-08-28T06:19:41.175Z",
+    "translations": [],
+    "version": "0.0.1",
+    "resources": [
+        {
+            "name": "ddf--concepts",
+            "path": "ddf--concepts.csv",
+            "schema": {
+                "fields": [
+                    {
+                        "name": "concept"
+                    },
+                    {
+                        "name": "concept_type"
+                    },
+                    {
+                        "name": "name"
+                    }
+                ],
+                "primaryKey": [
+                    "concept"
+                ]
+            }
+        }
+    ],
+    "ddfSchema": {
+        "concepts": [
+            {
+                "primaryKey": [
+                    "concept"
+                ],
+                "value": "concept_type",
+                "resources": [
+                    "ddf--concepts"
+                ]
+            },
+            {
+                "primaryKey": [
+                    "concept"
+                ],
+                "value": "name",
+                "resources": [
+                    "ddf--concepts"
+                ]
+            }
+        ],
+        "entities": [],
+        "datapoints": [],
+        "synonyms": []
+    }
+}
