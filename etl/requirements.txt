@@ -1,4 +1,1 @@
-# set your scripts' dependencies
-# example:
 polars
-requests
