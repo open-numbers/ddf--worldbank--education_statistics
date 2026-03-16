@@ -4,7 +4,6 @@
 ETL script to create DDF dataset from World Bank Education Statistics.
 """
 
-import re
 from pathlib import Path
 
 import polars as pl
@@ -15,14 +14,14 @@ OUTPUT_DIR = SCRIPT_DIR.parent.parent  # Root of the DDF dataset
 DATAPOINTS_DIR = OUTPUT_DIR / "datapoints"
 
 
-def to_concept_id(indicator_code: str) -> str:
-    """Convert indicator code to valid DDF concept ID."""
-    # Lowercase and replace dots/spaces with underscores
-    concept_id = indicator_code.lower()
-    concept_id = re.sub(r"[.\s]+", "_", concept_id)
-    # Remove any other invalid characters
-    concept_id = re.sub(r"[^a-z0-9_]", "", concept_id)
-    return concept_id
+def to_concept_id_expr(col: str) -> pl.Expr:
+    """Return a Polars expression that converts an indicator code column to a valid DDF concept ID."""
+    return (
+        pl.col(col)
+        .str.to_lowercase()
+        .str.replace_all(r"[\.\s]+", "_")
+        .str.replace_all(r"[^a-z0-9_]", "")
+    )
 
 
 def read_source_csv(filename: str) -> pl.DataFrame:
@@ -44,9 +43,7 @@ def create_concepts(data_df: pl.DataFrame) -> pl.DataFrame:
 
     # Create concept IDs from Series Code
     concepts = series_df.select(
-        pl.col("Series Code")
-        .map_elements(to_concept_id, return_dtype=pl.Utf8)
-        .alias("concept"),
+        to_concept_id_expr("Series Code").alias("concept"),
         pl.lit("measure").alias("concept_type"),
         pl.col("Indicator Name").alias("name"),
         pl.col("Series Code").alias("indicator_code"),
@@ -74,19 +71,13 @@ def create_concepts(data_df: pl.DataFrame) -> pl.DataFrame:
 
     # Add missing indicators from data file
     series_codes = set(
-        series_df.select(
-            pl.col("Series Code").map_elements(to_concept_id, return_dtype=pl.Utf8)
-        )
-        .to_series()
-        .to_list()
+        series_df.select(to_concept_id_expr("Series Code")).to_series().to_list()
     )
 
     data_indicators = data_df.select(
         pl.col("Indicator Code"),
         pl.col("Indicator Name"),
-        pl.col("Indicator Code")
-        .map_elements(to_concept_id, return_dtype=pl.Utf8)
-        .alias("concept"),
+        to_concept_id_expr("Indicator Code").alias("concept"),
     ).unique()
 
     missing_indicators = data_indicators.filter(~pl.col("concept").is_in(series_codes))
@@ -385,52 +376,56 @@ def create_countries(data_df: pl.DataFrame) -> pl.DataFrame:
     return entities
 
 
-def create_datapoints(data_df: pl.DataFrame) -> dict[str, pl.DataFrame]:
-    """Create datapoints from main data file."""
+def create_datapoints(data_df: pl.DataFrame) -> int:
+    """Create datapoints from main data file. Writes files directly to save memory.
+
+    Returns the number of datapoint files written.
+    """
     # Get year columns (numeric columns)
     year_cols = [c for c in data_df.columns if c.isdigit()]
 
     print(f"Found {len(year_cols)} year columns: {year_cols[0]} to {year_cols[-1]}")
     print(f"Found {data_df.select('Indicator Code').n_unique()} unique indicators")
 
-    # Melt to long format
+    # Melt to long format, keeping only needed columns
     print("Melting data to long format...")
-    df_long = data_df.unpivot(
-        index=["Country Code", "Indicator Code"],
+    df_long = data_df.select(
+        pl.col("Country Code").str.to_lowercase().alias("country"),
+        to_concept_id_expr("Indicator Code").alias("concept"),
+        *[pl.col(c) for c in year_cols],
+    ).unpivot(
+        index=["country", "concept"],
         on=year_cols,
         variable_name="year",
         value_name="value",
     )
 
-    # Drop rows with empty values
-    df_long = df_long.filter(pl.col("value").is_not_null() & (pl.col("value") != ""))
+    # Drop the source dataframe to free memory
+    del data_df
 
-    # Add country and concept columns
-    df_long = df_long.with_columns(
-        pl.col("year").cast(pl.Int64),
-        pl.col("Country Code").str.to_lowercase().alias("country"),
-        pl.col("Indicator Code")
-        .map_elements(to_concept_id, return_dtype=pl.Utf8)
-        .alias("concept"),
-    )
+    # Drop rows with empty values and cast year
+    df_long = df_long.filter(
+        pl.col("value").is_not_null() & (pl.col("value") != "")
+    ).with_columns(pl.col("year").cast(pl.Int64))
 
     print(f"Total datapoints after removing empty values: {df_long.height}")
 
-    # Group by indicator and create separate dataframes
-    datapoints = {}
-    for concept_id in df_long.select("concept").unique().to_series().to_list():
-        dp = (
-            df_long.filter(pl.col("concept") == concept_id)
-            .select(
-                pl.col("country"),
-                pl.col("year"),
-                pl.col("value").alias(concept_id),
-            )
-            .sort(["country", "year"])
+    # Write each indicator's datapoints directly to disk
+    DATAPOINTS_DIR.mkdir(exist_ok=True)
+    count = 0
+    for (concept_id,), dp in df_long.group_by("concept"):
+        dp.select(
+            pl.col("country"),
+            pl.col("year"),
+            pl.col("value").alias(concept_id),
+        ).sort(["country", "year"]).write_csv(
+            DATAPOINTS_DIR / f"ddf--datapoints--{concept_id}--by--country--year.csv"
         )
-        datapoints[concept_id] = dp
+        count += 1
+        if count % 500 == 0:
+            print(f"  Written {count} files...")
 
-    return datapoints
+    return count
 
 
 def main():
@@ -450,17 +445,9 @@ def main():
     print(f"Created {countries.height} countries")
 
     print("\nCreating datapoints...")
-    datapoints = create_datapoints(data_df)
+    num_datapoints = create_datapoints(data_df)
 
-    print(f"\nWriting {len(datapoints)} datapoint files...")
-    DATAPOINTS_DIR.mkdir(exist_ok=True)
-    for i, (concept_id, dp) in enumerate(datapoints.items()):
-        filename = f"ddf--datapoints--{concept_id}--by--country--year.csv"
-        dp.write_csv(DATAPOINTS_DIR / filename)
-        if (i + 1) % 500 == 0:
-            print(f"  Written {i + 1}/{len(datapoints)} files...")
-
-    print(f"\nDone! Created {len(datapoints)} datapoint files")
+    print(f"\nDone! Created {num_datapoints} datapoint files")
 
 
 if __name__ == "__main__":
