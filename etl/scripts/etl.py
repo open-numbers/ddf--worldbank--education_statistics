@@ -379,50 +379,56 @@ def create_countries(data_df: pl.DataFrame) -> pl.DataFrame:
 def create_datapoints(data_df: pl.DataFrame) -> int:
     """Create datapoints from main data file. Writes files directly to save memory.
 
+    Processes one indicator at a time to avoid melting the entire dataset.
+
     Returns the number of datapoint files written.
     """
     # Get year columns (numeric columns)
     year_cols = [c for c in data_df.columns if c.isdigit()]
 
     print(f"Found {len(year_cols)} year columns: {year_cols[0]} to {year_cols[-1]}")
-    print(f"Found {data_df.select('Indicator Code').n_unique()} unique indicators")
 
-    # Melt to long format, keeping only needed columns
-    print("Melting data to long format...")
-    df_long = data_df.select(
+    # Prepare a slim dataframe with only what we need (country + indicator + years)
+    slim_df = data_df.select(
         pl.col("Country Code").str.to_lowercase().alias("country"),
         to_concept_id_expr("Indicator Code").alias("concept"),
         *[pl.col(c) for c in year_cols],
-    ).unpivot(
-        index=["country", "concept"],
-        on=year_cols,
-        variable_name="year",
-        value_name="value",
     )
-
-    # Drop the source dataframe to free memory
     del data_df
 
-    # Drop rows with empty values and cast year
-    df_long = df_long.filter(
-        pl.col("value").is_not_null() & (pl.col("value") != "")
-    ).with_columns(pl.col("year").cast(pl.Int64))
+    # Get unique indicators
+    indicators = slim_df.select("concept").unique().to_series().to_list()
+    print(f"Found {len(indicators)} unique indicators")
 
-    print(f"Total datapoints after removing empty values: {df_long.height}")
-
-    # Write each indicator's datapoints directly to disk
     DATAPOINTS_DIR.mkdir(exist_ok=True)
     count = 0
-    for (concept_id,), dp in df_long.group_by("concept"):
-        dp.select(
-            pl.col("country"),
-            pl.col("year"),
-            pl.col("value").alias(concept_id),
-        ).sort(["country", "year"]).write_csv(
-            DATAPOINTS_DIR / f"ddf--datapoints--{concept_id}--by--country--year.csv"
+
+    # Process one indicator at a time to keep memory low
+    for concept_id in indicators:
+        indicator_df = slim_df.filter(pl.col("concept") == concept_id).select(
+            pl.col("country"), *[pl.col(c) for c in year_cols]
         )
-        count += 1
-        if count % 500 == 0:
+
+        # Melt only this indicator's rows
+        melted = (
+            indicator_df.unpivot(
+                index=["country"],
+                on=year_cols,
+                variable_name="year",
+                value_name=concept_id,
+            )
+            .filter(pl.col(concept_id).is_not_null() & (pl.col(concept_id) != ""))
+            .with_columns(pl.col("year").cast(pl.Int64))
+            .sort(["country", "year"])
+        )
+
+        if melted.height > 0:
+            melted.write_csv(
+                DATAPOINTS_DIR / f"ddf--datapoints--{concept_id}--by--country--year.csv"
+            )
+            count += 1
+
+        if count % 500 == 0 and count > 0:
             print(f"  Written {count} files...")
 
     return count
